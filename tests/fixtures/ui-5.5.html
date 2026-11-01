@@ -1,0 +1,28 @@
+<!doctype html><meta charset="utf-8"><title>5.5.0 界面与自动答题检查</title>
+<style>body{font:15px/1.6 system-ui;margin:28px;max-width:720px;background:#f6f8fb;color:#243342}.question-element-node{padding:12px;background:white;margin:10px 0}.checkbox{padding:4px 10px}.selected{background:#d7eee6}.page-name{padding:8px}video{width:270px;height:80px}#checks{white-space:pre-wrap}button{font:inherit}body{padding-right:260px}@media(max-width:800px){body{padding-right:0;max-width:220px}}</style>
+<h1>5.5.0 本地功能检查</h1><p>以下题目、答案与存储均为本地模拟，不连接优学院，不写入实际课程。</p>
+<button id="run-tests" disabled>运行界面与自动答题检查</button><p id="checks" role="status">正在启动…</p>
+<div id="page456"><div class="page-name active">模拟练习</div></div><div id="MathDiv"><video controls muted src="short-media.wav"></video></div><div id="questions"></div><button id="submit">模拟提交（不得自动点击）</button>
+<script>
+(async()=>{
+ const module={exports:{}};new Function('module','window',await(await fetch('../../repaired.user.js')).text())(module,undefined);const core=module.exports;
+ const answers=['D','C','D','A','D'];let requests=0,submits=0;const reads=[],writes=[];
+ for(let i=0;i<5;i++){const q=document.createElement('article');q.className='question-element-node';q.innerHTML=`<div class="question-wrapper" id="question${123+i}"><span class="question-type-tag"></span><p class="question-title-html">本地测试题目 ${i+1}</p><div class="options"></div></div>`;const options=q.querySelector('.options');for(let j=0;j<4;j++){const item=document.createElement('div');item.innerHTML=`<button class="checkbox radio" type="button">${String.fromCharCode(65+j)}</button><span class="option-content">选项${j+1}</span>`;const button=item.querySelector('button');button.onclick=()=>{q.querySelectorAll('.checkbox').forEach(b=>b.classList.remove('selected'));button.classList.add('selected');};options.append(item);}document.getElementById('questions').append(q);}
+ document.getElementById('submit').onclick=()=>submits++;
+ const testWin={location:{hostname:'ua.ulearning.cn',pathname:'/learnCourse/learnCourse.html',href:'https://ua.ulearning.cn/learnCourse/learnCourse.html'},document,MutationObserver,queueMicrotask:window.queueMicrotask.bind(window),addEventListener:window.addEventListener.bind(window),removeEventListener:window.removeEventListener.bind(window),setTimeout:window.setTimeout.bind(window),clearTimeout:window.clearTimeout.bind(window),fetch:async(url)=>{requests++;const id=Number(/questionAnswer\/(\d+)/.exec(url)[1]);return{ok:true,status:200,json:async()=>({correctAnswerList:[answers[id-123]]})};}};testWin.top=testWin;
+ const stored={rate:1.5,muted:true,autoPlay:false,autoNext:false};const helper=core.start(testWin,document,{get:async(k,f)=>{reads.push(k);if(new URLSearchParams(location.search).has('storage-error'))throw Error('模拟读取失败');return k===core.SETTINGS_KEY?stored:f;},set:async(k,v)=>writes.push([k,v])});await helper.ready;const root=helper.root,ui=id=>root.getElementById(id);const output=document.getElementById('checks');output.textContent='面板已启动，可运行检查。';const run=document.getElementById('run-tests');run.disabled=false;
+ run.onclick=async()=>{run.disabled=true;const rows=[];const check=(label,ok)=>{rows.push((ok?'通过':'失败')+' · '+label);if(!ok)throw Error(label);};try{
+ check('只保留视频与自动答题两个入口',root.querySelectorAll('[role="tab"]').length===2&&!ui('bank')&&!ui('fill'));
+ check('不读取旧本地题库存储',reads.includes(core.SETTINGS_KEY)&&reads.every(key=>!key.includes('bank')));
+ check('保留原有播放设置',ui('rate').value==='1.5'&&ui('muted').checked&&!ui('auto-play').checked);
+ ui('collapse').click();check('收起为悬浮按钮',ui('panel').hidden&&!ui('toggle').hidden);ui('toggle').click();check('重新展开面板',!ui('panel').hidden&&ui('toggle').hidden);
+ root.querySelector('[data-rate="2"]').click();check('倍速预设等待应用',ui('rate').value==='2'&&document.querySelector('video').playbackRate===1.5);ui('apply').click();await Promise.resolve();check('应用预设更新媒体且保存',document.querySelector('video').playbackRate===2&&writes.at(-1)?.[1].rate===2);
+ ui('qa-tab').click();check('可切换到自动答题',ui('media-page').hidden&&!ui('qa-page').hidden&&ui('qa-tab').getAttribute('aria-selected')==='true');
+ ui('qa-run').click();await new Promise(resolve=>setTimeout(resolve,80));
+ check('5 道题调用查询且正确填入',requests===5&&[...document.querySelectorAll('.question-element-node')].every((q,i)=>q.querySelector('.selected')?.textContent===answers[i]));
+ check('展示逐题结果且不自动提交',ui('qa-results').children.length===5&&ui('message').textContent.includes('5 / 5')&&submits===0);
+ check('完成后可再次操作',!ui('qa-run').disabled&&ui('qa-stop').disabled);
+ output.textContent=rows.join('\n')+'\n合计 '+rows.length+' / '+rows.length+' 通过';
+ }catch(error){output.textContent=rows.join('\n')+'\n检查中断：'+error.message;}finally{run.disabled=false;}};
+})();
+</script>

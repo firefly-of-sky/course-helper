@@ -1,0 +1,14 @@
+{
+  "name": "course-helper",
+  "version": "5.6.1",
+  "private": true,
+  "description": "网课视频播放、跨章连播与优学院课件练习辅助用户脚本",
+  "license": "AGPL-3.0-only",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "check": "node --check repaired.user.js",
+    "test": "node --test tests/*.test.cjs"
+  }
+}

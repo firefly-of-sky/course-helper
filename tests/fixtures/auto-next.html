@@ -1,0 +1,42 @@
+<!doctype html>
+<meta charset="utf-8"><title>自动切视频 · 结束事件复查验证</title>
+<style>body{font:16px/1.7 system-ui;margin:40px;max-width:800px;background:#f5f8fc}.page-item{display:inline-block;padding:12px;background:white;margin:5px}.active{color:#175fa3;font-weight:bold}video{width:520px;height:200px;background:#16263b}.next-page-btn{cursor:pointer;border:1px solid #abc;padding:12px;width:220px}#log{white-space:pre-wrap}</style>
+<h1>自动切视频 · 结束事件复查验证</h1>
+<p>独立模拟优学院目录。媒体为本地产生的 8 秒静音 WAV，通过 HTML video 控件正常播放；不连接课程、不写入学习进度。</p>
+<div class="chapter-item"><div class="section-item"><div id="catalog"></div></div></div>
+<button id="start-test" disabled>开始本地正常播放验证</button><div id="MathDiv"></div>
+<div class="next-page-btn"><div class="page-title"><span class="text"></span></div>下一页</div>
+<p id="log" role="status">正在加载修复版…</p>
+<script>
+(async()=>{
+ const module={exports:{}};
+ new Function('module','window',await (await fetch('../../repaired.user.js')).text())(module,undefined);
+ const core=module.exports;
+ const names=['测试视频一','测试视频二','测试视频三','练习（不得自动进入）'];
+ const lostEvent=new URLSearchParams(location.search).has('lost-event');
+ const rewind=new URLSearchParams(location.search).has('rewind');
+ let index=0, ended=0, nextClicks=0;
+ const catalog=document.getElementById('catalog'), content=document.getElementById('MathDiv'), log=document.getElementById('log');
+ names.forEach((name,i)=>{ const item=document.createElement('div');item.className='page-item';item.id='page'+(i+1);item.innerHTML='<div class="page-name"><div class="page-icon"><i class="iconfont">'+(i===3?'\ue850':'\ue852')+'</i></div><span data-bind="text: page.name()">'+name+'</span></div>';catalog.appendChild(item); });
+ function updateLog(){log.textContent='当前页：'+names[index]+'\n浏览器自然 ended：'+ended+' 次\n自动点击下一页：'+nextClicks+' 次';}
+ function render(){
+  catalog.querySelectorAll('.page-name').forEach((e,i)=>e.classList.toggle('active',i===index));
+  document.querySelector('.next-page-btn .text').textContent=names[index+1]||'没有了';
+  content.replaceChildren();
+  if(index<3){const v=document.createElement('video');v.controls=true;v.muted=true;v.src='short-media.wav';v.addEventListener('ended',e=>{if(e.isTrusted)ended++;updateLog();if(lostEvent)e.stopImmediatePropagation();},true);if(rewind)v.addEventListener('ended',()=>{v.currentTime=0;v.pause();});content.appendChild(v);}
+  else {const p=document.createElement('p');p.className='question-setting-panel';p.textContent='练习页（不应自动进入）';content.appendChild(p);}
+  updateLog();
+ }
+ document.querySelector('.next-page-btn').onclick=()=>{nextClicks++;if(index<3)index++;render();};
+ const testWin={location:{hostname:'ua.ulearning.cn',pathname:'/learnCourse/learnCourse.html',href:'https://ua.ulearning.cn/learnCourse/learnCourse.html?courseId=fixture'},document,
+  MutationObserver,queueMicrotask:window.queueMicrotask.bind(window),addEventListener:window.addEventListener.bind(window),removeEventListener:window.removeEventListener.bind(window),setTimeout:window.setTimeout.bind(window),clearTimeout:window.clearTimeout.bind(window)};
+ testWin.top=testWin;
+ render();
+ const values=new Map([['course-helper-repaired-settings-v1',{rate:2,muted:true,autoPlay:false,autoNext:true}]]);
+ const helper=core.start(testWin,document,{get:async(k,f)=>values.has(k)?values.get(k):f,set:async(k,v)=>values.set(k,v)});
+ await helper.ready;
+ const start=document.getElementById('start-test');start.disabled=false;
+ start.onclick=()=>{helper.root.getElementById('auto-play').checked=true;helper.root.getElementById('apply').click();start.disabled=true;};
+ document.querySelector('h1').textContent += lostEvent?'（通知被拦截，验证 ended 复查）':rewind?'（播放器在自然结束后回零）':'（连续三个媒体）';
+})();
+</script>

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>网课脚本修复 · 本地模拟页面</title>
+<style>body{font:16px/1.6 system-ui;margin:40px;max-width:700px;background:#fafbfd}button{padding:8px}video{width:240px;height:100px;background:#182439}article{border:1px solid #ddd;padding:15px;margin:10px 0}</style>
+<h1>网课脚本修复 · 本地模拟页面</h1>
+<p>验证悬浮面板、动态视频与播放设置。不连接任何真实教学平台。</p>
+<button id="add-video">模拟延迟加载视频</button>
+<button id="add-frame">模拟同源嵌入视频页</button>
+<button id="rerun">重复加载脚本</button>
+<div id="videos"></div><div id="frames"></div>
+<script>
+// 本地夹具模拟脚本管理器存储，正式脚本不依赖 localStorage。
+window.GM = {
+    async getValue(key, fallback) {
+        if (new URLSearchParams(location.search).get('storage') === 'error') throw new Error('模拟存储读取失败');
+        const value = localStorage.getItem(key); return value === null ? fallback : JSON.parse(value);
+    },
+    async setValue(key, value) { localStorage.setItem(key, JSON.stringify(value)); }
+};
+document.getElementById('add-video').onclick = () => {
+    const video = document.createElement('video');
+    video.controls = true;
+    document.getElementById('videos').appendChild(video);
+};
+document.getElementById('add-frame').onclick = () => {
+    const frame = document.createElement('iframe');
+    frame.title = '模拟嵌入课件';
+    frame.src = 'frame.html';
+    frame.style.cssText = 'width:650px;height:320px;border:1px solid #777';
+    document.getElementById('frames').appendChild(frame);
+};
+document.getElementById('rerun').onclick = () => {
+    const script = document.createElement('script'); script.src = '../../repaired.user.js'; document.body.appendChild(script);
+};
+</script>
+<script src="../../repaired.user.js"></script>
+</html>
