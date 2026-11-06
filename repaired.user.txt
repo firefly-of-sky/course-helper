@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         全国网课辅助（本地修复版）
+// @name         网课助手
 // @namespace    super_coolhii_video_helper_cat
-// @version      5.7.8
+// @version      5.7.9
 // @description  视频播放、优学院填答与智慧树知识点反馈练习；智慧树全流程需手动启动，最多自动提交三轮。
-// @author       coolhii（原稿）；本地修复
+// @author       firefly
 // @license      AGPL-3.0-only
 // @downloadURL  none
 // @match        *://*.chaoxing.com/*
@@ -1368,7 +1368,7 @@
           </style>
           <button id="toggle" type="button" aria-expanded="false" aria-controls="panel" title="点击展开，按住可拖动">网课助手</button>
           <section id="panel" hidden aria-label="网课助手">
-            <header id="drag-handle" tabindex="0" aria-label="拖动网课助手；也可用方向键移动，按住 Shift 加速" title="按住标题栏拖动"><span class="brand" aria-hidden="true">课</span><div class="identity"><h2>网课助手<span class="version">5.7.8</span></h2><p id="platform"></p></div><button id="reset-position" type="button" title="恢复面板默认位置" aria-label="恢复面板默认位置">复位</button><button id="collapse" type="button" aria-label="收起网课助手">−</button></header>
+            <header id="drag-handle" tabindex="0" aria-label="拖动网课助手；也可用方向键移动，按住 Shift 加速" title="按住标题栏拖动"><span class="brand" aria-hidden="true">课</span><div class="identity"><h2>网课助手<span class="version">5.7.9</span></h2><p id="platform"></p></div><button id="reset-position" type="button" title="恢复面板默认位置" aria-label="恢复面板默认位置">复位</button><button id="collapse" type="button" aria-label="收起网课助手">−</button></header>
             <nav role="tablist" aria-label="功能"><button id="media-tab" type="button" role="tab" aria-selected="true" aria-controls="media-page">视频播放</button><button id="qa-tab" type="button" role="tab" aria-selected="false" aria-controls="qa-page">自动答题</button></nav>
             <section id="media-page" class="page" role="tabpanel" aria-labelledby="media-tab">
               <div class="section-heading"><h3>播放设置</h3><p id="media-count"></p></div>
@@ -1613,8 +1613,8 @@
     const boot = () => {
         try {
             const instance = start(window, document, storage);
-            instance?.ready.catch(error => console.error('[网课辅助] 初始化失败', error));
-        } catch (error) { console.error('[网课辅助] 面板创建失败', error); }
+            instance?.ready.catch(error => console.error('[网课助手] 初始化失败', error));
+        } catch (error) { console.error('[网课助手] 面板创建失败', error); }
     };
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot, { once: true });
     else boot();
