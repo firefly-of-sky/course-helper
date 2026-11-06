@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         全国网课辅助（本地修复版）
 // @namespace    super_coolhii_video_helper_cat
-// @version      5.6.1
-// @description  视频播放控制、正常结束自动切视频与优学院自动答题。填入后由本人核对提交。
+// @version      5.7.8
+// @description  视频播放、优学院填答与智慧树知识点反馈练习；智慧树全流程需手动启动，最多自动提交三轮。
 // @author       coolhii（原稿）；本地修复
 // @license      AGPL-3.0-only
 // @downloadURL  none
@@ -90,6 +90,9 @@
     const PANEL_ID = 'course-helper-repaired-panel';
     const SETTINGS_KEY = 'course-helper-repaired-settings-v1';
     const POSITION_KEY = 'course-helper-panel-position-v1';
+    const PANEL_VIEW_KEY = 'course-helper-panel-collapsed-v1';
+    const PANEL_TAB_KEY = 'course-helper-panel-tab-v1';
+    const ZHS_FLOW_KEY = 'course-helper-zhihuishu-feedback-v1';
     const DEFAULTS = Object.freeze({ rate: 1, muted: false, autoPlay: false, autoNext: false, videoOnly: false });
 
     function isDomain(host, domain) {
@@ -199,7 +202,292 @@
 
     function questionSignature(questions) {
         return JSON.stringify(questions.map(question => [question.parentId, question.id, question.title,
-            question.type, question.options.map(option => [option.letter, option.text])]));
+            question.type, question.options.map(option => [option.letter, option.text, option.id || '']), question.rawContent || '', question.blankIds || []]));
+    }
+
+    // 只支持已核对的 AI 课程知识点练习，不将普通作业或考试当作可反复提交的练习。
+    function zhihuishuContext(location) {
+        const parts = location.pathname.split('/').filter(Boolean);
+        const query = new URLSearchParams(location.search || '');
+        let context;
+        if (location.hostname === 'studentexamcomh5.zhihuishu.com' && parts[0] === 'studentReviewTestOrExam' &&
+            query.get('point') === '1' && query.get('foAiRun') === '1') {
+            context = { kind: 'practice', course: parts[4], exam: parts[1], paper: query.get('paperId'),
+                point: query.get('pointId'), classId: query.get('classId') };
+        } else if (location.hostname === 'ai-smart-course-student-pro.zhihuishu.com' &&
+            ['point', 'examPreview'].includes(parts[0]) && parts.length === 6) {
+            context = { kind: parts[0] === 'point' ? 'result' : 'feedback', course: parts[1], paper: parts[2],
+                exam: parts[3], point: parts[4], classId: parts[5] };
+        }
+        if (!context || !['course', 'exam', 'paper', 'point', 'classId'].every(key => /^\d+$/.test(context[key] || ''))) return null;
+        return { ...context, key: [context.course, context.point, context.classId].join(':') };
+    }
+
+    function zhihuishuOptionKey(ids) {
+        if (!Array.isArray(ids) || ids.length < 2 || ids.length > 26 ||
+            ids.some(id => !/^\d+$/.test(String(id))) || new Set(ids.map(String)).size !== ids.length) return '';
+        return ids.map(String).sort().join(',');
+    }
+
+    function zhihuishuBlankKey(ids) {
+        if (!Array.isArray(ids) || !ids.length || ids.length > 50 ||
+            ids.some(id => !/^\d+$/.test(String(id))) || new Set(ids.map(String)).size !== ids.length) return '';
+        return 'blank:' + ids.map(String).sort().join(',');
+    }
+
+    function zhihuishuBlankFingerprint(text, images, count) {
+        if (!Number.isInteger(count) || count < 1 || count > 50 || !Array.isArray(images) || images.some(src => typeof src !== 'string' || !src.trim())) return '';
+        const punctuation = { '。':'.', '，':',', '：':':', '；':';', '（':'(', '）':')' };
+        const title = String(text ?? '').replace(/[\s\u200b]/g, '').replace(/[。，：；（）]/g, character => punctuation[character]);
+        if (!title && !images.length) return '';
+        return 'blank-content:' + JSON.stringify([title, images, count]);
+    }
+
+    function readZhihuishuQuestion(doc, pageDoc = doc) {
+        const context = zhihuishuContext(doc.defaultView.location);
+        if (context?.kind !== 'practice') return [];
+        const model = pageDoc.querySelector('.reviewTestOrExam')?.__vue__;
+        const data = model?.reviewTopicData;
+        const element = doc.querySelector('.Review-container .questionContent');
+        if (!element || !isVisible(element) || !data || String(data.id) !== String(model.currentQues?.questionId)) return [];
+        const type = ({ 1: 'single', 2: 'multiple', 14: 'judge', 3: 'blank' })[data.questionType] || 'unsupported';
+        const source = data.optionVos;
+        if (type === 'blank') {
+            if (!Array.isArray(source) || !zhihuishuBlankKey(source.map(option => option.id))) return [];
+            const inputs = [...element.querySelectorAll('.input-view.fillAnswer input.el-input__inner[type="text"]')].filter(isVisible);
+            if (inputs.length !== source.length) return [];
+            const template = doc.createElement('template'); template.innerHTML = String(data.content);
+            const images = [...template.content.querySelectorAll('img')].map(image => image.getAttribute('src'));
+            const blankKey = zhihuishuBlankFingerprint(template.content.textContent, images, inputs.length);
+            if (!blankKey) return [];
+            return [{ element, id: String(data.id), parentId: context.key, title: plainAnswer(doc, data.content),
+                type, options: [], inputs, blankKey, plainTextAnswers: true, blankIds: source.map(option => String(option.id)), asyncSelection: true,
+                savedInput: index => {
+                    const values = pageDoc.querySelector('.input-ques')?.__vue__?.$props?.preData;
+                    return Array.isArray(values) ? values.find(value => String(value.id) === String(source[index].id))?.content : null;
+                },
+                rawContent: String(data.content), ordinal: String(model.currentQues.sort), publicAnswers: [] }];
+        }
+        if (!Array.isArray(source) || !zhihuishuOptionKey(source.map(option => option.id))) return [];
+        const controls = [...element.querySelectorAll(type === 'multiple' ? '.el-checkbox__original' : '.radio-view > li')];
+        if (controls.length !== source.length) return [];
+        const options = source.map((option, index) => ({ id: String(option.id), letter: String.fromCharCode(65 + index),
+            text: plainAnswer(doc, option.content), control: controls[index] }));
+        if (type === 'multiple' && options.some(option => String(option.control.value) !== option.id)) return [];
+        const component = pageDoc.querySelector('.Review-container')?.__vue__;
+        const selected = index => {
+            if (type === 'multiple') return controls[index].checked === true;
+            if (controls[index].querySelector?.('.checkedIcon')) return true;
+            const value = component?.stuAnwser;
+            return (Array.isArray(value) ? value.map(String) : [String(value)]).includes(options[index].id);
+        };
+        return [{ element, id: String(data.id), parentId: context.key, title: plainAnswer(doc, data.content),
+            type, options, inputs: [], selected, asyncSelection: true, rawContent: String(data.content), ordinal: String(model.currentQues.sort),
+            publicAnswers: source.every(option => [true, false, 0, 1, '0', '1'].includes(option.isCorrect)) ?
+                source.flatMap((option, index) => [true, 1, '1'].includes(option.isCorrect) ? [options[index].letter] : []) : [] }];
+    }
+
+    function collectZhihuishuFeedback(doc) {
+        if (zhihuishuContext(doc.defaultView.location)?.kind !== 'feedback') return [];
+        return [...doc.querySelectorAll('.question-item')].filter(isVisible).flatMap(element => {
+            const type = normalizeQuestion(element.querySelector('.quest-type')?.textContent);
+            if (type.includes('填空')) {
+                const title = element.querySelector('.quest-title')?.cloneNode(true);
+                if (!title) return [];
+                title.querySelector('.option-index')?.remove();
+                const slots = [...element.querySelectorAll('.answer-item')];
+                const references = [...element.querySelectorAll('.answer-title')];
+                if (!slots.length || slots.length !== references.length) return [];
+                const answers = [];
+                for (const reference of references) {
+                    const spans = [...reference.children].filter(child => child.tagName === 'SPAN');
+                    if (spans.length !== 1 || spans[0].querySelector('img,svg,math')) return [];
+                    const value = normalizeQuestion(spans[0].textContent);
+                    if (!value) return [];
+                    answers.push(value);
+                }
+                const images = [...title.querySelectorAll('img')].map(image => image.getAttribute('src'));
+                const key = zhihuishuBlankFingerprint(title.textContent, images, answers.length);
+                return key ? [{ key, answers }] : [];
+            }
+            const inputs = [...element.querySelectorAll('input.el-checkbox__original,input.el-radio__original')];
+            const ids = inputs.map(input => input.value);
+            const key = zhihuishuOptionKey(ids);
+            const answer = normalizeQuestion(element.querySelector('.answer-title')?.textContent);
+            const match = /^参考答案\s*[:：]\s*([A-Z](?:\s*[、,，]\s*[A-Z])*)$/.exec(answer);
+            if (!key) return [];
+            if (!match) {
+                const judge = /^参考答案\s*[:：]\s*(对|错|正确|错误)$/.exec(answer);
+                const truth = value => ['对', '正确'].includes(value) ? 'true' : ['错', '错误'].includes(value) ? 'false' : '';
+                const labels = inputs.map(input => truth(normalizeQuestion(input.closest?.('label')?.textContent)));
+                if (!judge || inputs.length !== 2 || new Set(labels).size !== 2 || labels.some(label => !label)) return [];
+                return [{ key, answerIds: [ids[labels.indexOf(truth(judge[1]))]] }];
+            }
+            const letters = match[1].split(/[、,，]/).map(letter => letter.trim());
+            const indexes = letters.map(letter => letter.charCodeAt(0) - 65);
+            if (new Set(indexes).size !== indexes.length || indexes.some(index => index < 0 || index >= ids.length)) return [];
+            return [{ key, answerIds: indexes.map(index => ids[index]) }];
+        });
+    }
+
+    function zhihuishuFeedbackAnswer(question, records) {
+        if (question.publicAnswers?.length) return question.publicAnswers;
+        if (question.type === 'blank') {
+            const record = records.find(record => record.key === question.blankKey);
+            if (!record) throw new Error('尚无本轮正确答案反馈，请先运行“反馈练习全流程”');
+            if (!Array.isArray(record.answers) || record.answers.length !== question.inputs.length ||
+                record.answers.some(value => typeof value !== 'string' || !value.trim())) throw new Error('填空反馈与当前空位数量不一致');
+            return [...record.answers];
+        }
+        const key = zhihuishuOptionKey(question.options.map(option => option.id));
+        const record = records.find(record => record.key === key);
+        if (!record || !Array.isArray(record.answerIds) || !record.answerIds.length) throw new Error('尚无本轮正确答案反馈，请先运行“反馈练习全流程”');
+        const letters = record.answerIds.map(id => question.options.find(option => option.id === id)?.letter);
+        if (letters.some(letter => !letter) || new Set(letters).size !== letters.length ||
+            (question.type !== 'multiple' && letters.length !== 1)) throw new Error('反馈答案与当前题型或选项不一致');
+        return letters;
+    }
+
+    function zhihuishuAction(doc, texts) {
+        const candidates = [...doc.querySelectorAll('button,a,[role="button"],div.submit,div.improve-btn,div[class],span[class]')]
+            .filter(element => isVisible(element) && !element.disabled && texts.includes(normalizeQuestion(element.textContent)));
+        // 不点击同文案的多个不明控件。
+        const leaves = candidates.filter(element => !candidates.some(other => element !== other && element.contains(other)));
+        return leaves.length === 1 ? leaves[0] : null;
+    }
+
+    function createZhihuishuFlow({ win, doc, pageDoc = doc, storage, report, changed = () => {}, timers = win }) {
+        let running = false, stopped = false, state = null, expectedContext = null;
+        const now = () => Date.now();
+        const context = () => zhihuishuContext(win.location);
+        const save = async () => { await storage.set(ZHS_FLOW_KEY, state); changed(); };
+        const validState = value => value && value.version === 2 && Number.isInteger(value.round) && value.round >= 0 && value.round <= 3 && value.expires > now() &&
+            value.key === context()?.key && Array.isArray(value.records) && value.records.length <= 200 &&
+            ['initial', 'await-feedback', 'feedback', 'redo', 'refill', 'done', 'stopped'].includes(value.stage);
+        const ready = storage.get(ZHS_FLOW_KEY, null).then(value => { if (validState(value)) state = value; })
+            .catch(() => report('练习流程状态读取失败，未启动自动操作。'));
+        const delay = ms => new Promise(resolve => timers.setTimeout(resolve, ms));
+        function assertContext(key) {
+            if (stopped || doc.visibilityState === 'hidden' || !state || state.stage === 'stopped' || context()?.key !== key || state.expires <= now() ||
+                (expectedContext && ['kind','paper','exam'].some(field => context()?.[field] !== expectedContext[field]))) throw new Error('练习流程已停止或页面已切换');
+        }
+        async function waitFor(check, key, timeout = 15000) {
+            const end = now() + timeout;
+            while (now() < end) { assertContext(key); const value = check(); if (value) return value; await delay(180); }
+            throw new Error('平台页面响应超时，已停止，未重复提交');
+        }
+        function cards() {
+            return [...doc.querySelectorAll('.el-tree-node__content')].filter(element => isVisible(element) && /^\d+$/.test(normalizeQuestion(element.textContent)));
+        }
+        async function fillRound(initial) {
+            if (state.round >= 3) throw new Error('已达到 3 轮提交上限，请核对平台反馈');
+            const key = state.key;
+            await waitFor(() => cards().length && readZhihuishuQuestion(doc, pageDoc).length, key);
+            const items = cards();
+            if (!items.length || items.length > 200) throw new Error('无法确认本轮题卡，未提交');
+            const ordinals = items.map(element => normalizeQuestion(element.textContent));
+            if (new Set(ordinals).size !== items.length) throw new Error('题卡序号重复，未提交');
+            const seen = new Set();
+            for (let index = 0; index < ordinals.length; index++) {
+                assertContext(key);
+                const ordinal = ordinals[index];
+                const target = cards().find(element => normalizeQuestion(element.textContent) === ordinal);
+                if (!target) throw new Error('题卡已变化，未提交');
+                if (readZhihuishuQuestion(doc, pageDoc)[0]?.ordinal !== ordinal) target.click();
+                await delay(650);
+                const question = await waitFor(() => {
+                    const q = readZhihuishuQuestion(doc, pageDoc)[0];
+                    return q?.ordinal === ordinal && q;
+                }, key);
+                if (seen.has(question.id) || !['single', 'multiple', 'judge', 'blank'].includes(question.type)) throw new Error('出现重复题或未适配题型，未提交');
+                seen.add(question.id);
+                let answers;
+                try { answers = zhihuishuFeedbackAnswer(question, state.records); }
+                catch (error) {
+                    if (!error.message.startsWith('尚无')) throw error;
+                    answers = question.type === 'blank' ? question.inputs.map(() => '0') : ['A'];
+                }
+                const signature = questionSignature([question]);
+                const plan = planAnswer(question, answers, doc, true);
+                await applyZhihuishuAnswer(question, plan, {
+                    collect: () => readZhihuishuQuestion(doc, pageDoc), delay, assertCurrent: () => assertContext(key)
+                });
+                assertContext(key);
+                if (questionSignature(readZhihuishuQuestion(doc, pageDoc)) !== signature) throw new Error('填写时题目变化，未提交');
+                report((initial ? '首轮练习' : '按反馈重答') + '：' + (index + 1) + ' / ' + ordinals.length + ' 题已填写。');
+            }
+            state.total = ordinals.length;
+            // 先保存下一阶段，再点提交；跨页后不会重复提交这一轮。
+            const submit = zhihuishuAction(doc, ['提交作业']);
+            if (!submit) throw new Error('未找到唯一的练习提交按钮，请人工检查');
+            state.round++; state.paper = context().paper;
+            state.stage = 'await-feedback'; state.actionAt = now();
+            await save(); assertContext(key); submit.click();
+            report(initial ? '首轮已发起提交，等待平台反馈。' : '重答已发起提交，等待平台结果。');
+        }
+        async function tick() {
+            await ready;
+            if (running || stopped || doc.visibilityState === 'hidden' || !state || ['done', 'stopped'].includes(state.stage)) return;
+            if (!validState(state)) return;
+            running = true;
+            try {
+                const ctx = context(); expectedContext = ctx;
+                if (ctx.kind === 'practice' && ['initial', 'refill'].includes(state.stage)) await fillRound(state.stage === 'initial');
+                else if (ctx.kind === 'result' && state.stage === 'await-feedback') {
+                    const link = await waitFor(() => zhihuishuAction(doc, ['查看作答记录与解析']), state.key);
+                    state.stage = 'feedback'; await save(); assertContext(ctx.key); link.click();
+                } else if (ctx.kind === 'feedback' && ['feedback', 'await-feedback'].includes(state.stage)) {
+                    const records = await waitFor(() => { const values = collectZhihuishuFeedback(doc); return values.length && values; }, state.key);
+                    if (!records.length || (state.total && records.length !== state.total) || new Set(records.map(record => record.key)).size !== records.length) {
+                        throw new Error('平台没有公布全部可用答案，停止重答');
+                    }
+                    if (state.paper && ctx.paper !== state.paper) throw new Error('解析不属于刚提交的试卷，已停止');
+                    const items = [...doc.querySelectorAll('.question-item')].filter(isVisible);
+                    const correct = items.filter(item => /回答[\s～~]*正确/.test(item.querySelector('.question-result')?.textContent || '')).length;
+                    if (state.total && items.length === state.total && correct === items.length) {
+                        state.stage = 'done'; state.records = []; await save();
+                        report('反馈重答流程完成：平台确认 ' + correct + ' / ' + items.length + ' 题正确。'); return;
+                    }
+                    const merged = new Map(state.records.map(record => [record.key, record]));
+                    for (const record of records) {
+                        const old = merged.get(record.key);
+                        if (old && (old.answers ? JSON.stringify(old.answers) : [...old.answerIds].sort().join(',')) !==
+                            (record.answers ? JSON.stringify(record.answers) : [...record.answerIds].sort().join(','))) throw new Error('平台反馈答案发生冲突，已停止');
+                        merged.set(record.key, record);
+                    }
+                    if (merged.size > 200) throw new Error('本次反馈数量超过上限，已停止');
+                    state.records = [...merged.values()];
+                    if (state.round >= 3) throw new Error('已达到 3 轮提交上限，仍未确认全部正确；已停留在解析页');
+                    state.stage = 'redo'; await save();
+                    report('已收集 ' + records.length + ' 题正确答案，准备重新答题。');
+                } else if (ctx.kind === 'feedback' && state.stage === 'redo') {
+                    const redo = await waitFor(() => zhihuishuAction(doc, ['重新答题']), state.key);
+                    state.stage = 'refill'; state.actionAt = now(); await save(); assertContext(ctx.key); redo.click();
+                } else if (state.actionAt && now() - state.actionAt > 25000 &&
+                    ['await-feedback', 'refill'].includes(state.stage)) throw new Error('页面未按预期跳转，已停止，不会再次提交或重答');
+            } catch (error) {
+                if (state) { state.stage = 'stopped'; await save().catch(() => {}); }
+                report(error.message);
+            } finally { running = false; expectedContext = null; changed(); }
+        }
+        async function begin() {
+            await ready;
+            if (running || stopped) return;
+            const ctx = context();
+            if (!ctx || !['practice', 'feedback'].includes(ctx.kind)) { report('请先打开智慧树知识点练习或本次解析页。'); return; }
+            if (state && !['done', 'stopped'].includes(state.stage)) { report('已有流程正在运行，请勿重复开始。'); return; }
+            state = { version: 2, round: 0, paper: '', key: ctx.key, stage: ctx.kind === 'feedback' ? 'feedback' : 'initial', records: [],
+                expires: now() + 60 * 60 * 1000, actionAt: 0, total: 0 };
+            await save(); await tick();
+        }
+        async function cancel() {
+            if (state) { state.stage = 'stopped'; state.records = []; await save(); }
+            report('反馈练习已停止，已提交的练习记录由平台保留。');
+        }
+        const interval = timers.setInterval(() => { void tick(); }, 850);
+        return { ready, begin, cancel, tick, active: () => !!state && !['done', 'stopped'].includes(state.stage),
+            records: () => state?.records || [], stage: () => state?.stage || '',
+            stop() { stopped = true; timers.clearInterval(interval); } };
     }
 
     function parsePlatformAnswer(payload) {
@@ -225,6 +513,7 @@
         if (!values.length) throw new Error('答案为空');
         const indexes = values.map(value => {
             const text = normalizeQuestion(answerText(value));
+            if (preferLetters && /^[A-Z]$/i.test(text) && text.toUpperCase().charCodeAt(0) - 65 < question.options.length) return text.toUpperCase().charCodeAt(0) - 65;
             if (question.type === 'judge') {
                 const trueValues = ['正确', '对', '是', 'true', '√'];
                 const falseValues = ['错误', '错', '否', 'false', '×'];
@@ -247,7 +536,7 @@
     }
 
     function planAnswer(question, rawAnswers, doc, preferLetters = false) {
-        const answers = (Array.isArray(rawAnswers) ? rawAnswers : [rawAnswers]).map(value => plainAnswer(doc, value));
+        const answers = (Array.isArray(rawAnswers) ? rawAnswers : [rawAnswers]).map(value => question.plainTextAnswers ? normalizeQuestion(answerText(value)) : plainAnswer(doc, value));
         if (['single', 'multiple', 'judge'].includes(question.type)) {
             const indexes = choiceIndexes(question, answers, preferLetters);
             if (question.options.some(option => option.control.disabled || option.control.getAttribute('aria-disabled') === 'true')) {
@@ -265,7 +554,7 @@
         throw new Error('该题型尚未适配');
     }
 
-    function applyAnswer(question, plan) {
+    function applyAnswer(question, plan, verify = true) {
         if (!isVisible(question.element)) throw new Error('题目已离开当前页面');
         if (plan.kind === 'text') {
             question.inputs.forEach((input, index) => {
@@ -273,7 +562,8 @@
             });
             return;
         }
-        const selected = control => control.classList.contains('selected') || control.getAttribute('aria-checked') === 'true';
+        const selected = control => question.selected ? question.selected(question.options.findIndex(option => option.control === control)) :
+            control.classList.contains('selected') || control.getAttribute('aria-checked') === 'true';
         if (question.type === 'multiple') {
             question.options.forEach((option, index) => {
                 if (selected(option.control) !== plan.indexes.includes(index)) option.control.click();
@@ -282,7 +572,54 @@
             const target = question.options[plan.indexes[0]].control;
             if (!selected(target)) target.click();
         }
-        const actual = question.options.flatMap((option, index) => selected(option.control) ? [index] : []);
+        if (verify) verifySelection(question, plan);
+    }
+
+    async function applyZhihuishuAnswer(question, plan, { collect, delay, assertCurrent }) {
+        const signature = questionSignature([question]);
+        const current = () => {
+            assertCurrent();
+            const value = collect()[0];
+            if (!value || questionSignature([value]) !== signature) throw new Error('填写时题目变化，未提交');
+            return value;
+        };
+        if (plan.kind === 'text') {
+            for (let index = 0; index < plan.answers.length; index++) {
+                const fresh = current();
+                if (fresh.inputs.length !== plan.answers.length || !setInputValue(fresh.inputs[index], plan.answers[index])) throw new Error('填空输入框已变化或不可编辑，未提交');
+                const view = fresh.inputs[index].ownerDocument.defaultView;
+                fresh.inputs[index].dispatchEvent(new view.KeyboardEvent('keyup', { key: 'Unidentified', bubbles: true }));
+                fresh.inputs[index].dispatchEvent(new view.Event('blur'));
+                await delay(350);
+                const updated = current();
+                if (updated.inputs.length !== plan.answers.length || (updated.inputs[index].value !== plan.answers[index] || (updated.savedInput && String(updated.savedInput(index) ?? '') !== plan.answers[index]))) throw new Error('填空答案未保存，未提交');
+            }
+            await delay(350);
+            const fresh = current();
+            if (fresh.inputs.length !== plan.answers.length || fresh.inputs.some((input, index) => (input.value !== plan.answers[index] || (fresh.savedInput && String(fresh.savedInput(index) ?? '') !== plan.answers[index])))) throw new Error('填空答案被页面改写，未提交');
+            return;
+        }
+        if (question.type === 'multiple') {
+            for (let index = 0; index < question.options.length; index++) {
+                const fresh = current();
+                if (fresh.selected(index) !== plan.indexes.includes(index)) {
+                    fresh.options[index].control.click();
+                    // 平台在下一轮渲染后才保存多选数组；连续同步点击会覆盖前一项。
+                    await delay(250);
+                    if (current().selected(index) !== plan.indexes.includes(index)) throw new Error('多选项未保存，已停止提交');
+                }
+            }
+        } else {
+            applyAnswer(current(), plan, false);
+            await delay(250);
+        }
+        await delay(250);
+        verifySelection(current(), plan);
+    }
+
+    function verifySelection(question, plan) {
+        const actual = question.options.flatMap((option, index) => (question.selected ? question.selected(index) :
+            option.control.classList.contains('selected') || option.control.getAttribute('aria-checked') === 'true') ? [index] : []);
         if (actual.length !== plan.indexes.length || actual.some(index => !plan.indexes.includes(index))) {
             throw new Error('页面未确认选中状态，请人工检查');
         }
@@ -374,19 +711,19 @@
         };
     }
 
-    function createQuestionRunner({ doc, provider, report, results, controller = () => new AbortController() }) {
+    function createQuestionRunner({ doc, provider, report, results, collect = collectQuestions, controller = () => new AbortController() }) {
         let active = null;
         function cancel() { active?.abort(); }
         async function run() {
             if (active) return;
             const operation = controller();
             active = operation;
-            const questions = collectQuestions(doc);
+            const questions = collect(doc);
             const signature = questionSignature(questions);
             const rows = [];
             let filled = 0;
             try {
-                if (!questions.length) { report('当前页面没有可识别的优学院课件练习题。'); return; }
+                if (!questions.length) { report('当前页面没有可识别的课件练习题。'); return; }
                 for (let index = 0; index < questions.length; index++) {
                     if (operation.signal.aborted) throw new Error('已停止填答');
                     const question = questions[index];
@@ -401,15 +738,22 @@
                         try { answers = await provider(question, operation.signal); }
                         finally { clearTimeout(timeout); }
                         if (operation.signal.aborted) throw new Error('请求已停止或超时');
-                        if (questionSignature(collectQuestions(doc)) !== signature) throw new Error('页面已切换，停止写入');
+                        if (questionSignature(collect(doc)) !== signature) throw new Error('页面已切换，停止写入');
                         const plan = planAnswer(question, answers, doc, true);
-                        applyAnswer(question, plan);
+                        if (question.asyncSelection) {
+                            await applyZhihuishuAnswer(question, plan, {
+                                collect: () => collect(doc), delay: ms => new Promise(resolve => setTimeout(resolve, ms)),
+                                assertCurrent: () => {
+                                    if (operation.signal.aborted || questionSignature(collect(doc)) !== signature) throw new Error('页面已切换或填写已停止');
+                                }
+                            });
+                        } else applyAnswer(question, plan);
                         row.status = '已填入（平台答案）';
                         row.answer = plan.summary;
                         filled++;
                     } catch (error) {
                         row.status = error.message;
-                        if (operation.signal.aborted || questionSignature(collectQuestions(doc)) !== signature) throw error;
+                        if (operation.signal.aborted || questionSignature(collect(doc)) !== signature) throw error;
                     }
                     results(rows);
                 }
@@ -843,7 +1187,61 @@
             stop() { stopped = true; scan(); } };
     }
 
-    function createPanelDragController(win, host, handles, storage, report, key = POSITION_KEY) {
+    function createPanelTabController(root, storage, report, key = PANEL_TAB_KEY, qaEnabled = true, changed = () => {}) {
+        let page = 'media', interacted = false, stopped = false, writes = Promise.resolve();
+        function render() {
+            const shown = page === 'qa' && !qaEnabled ? 'media' : page;
+            for (const name of ['media', 'qa']) {
+                root.getElementById(name + '-page').hidden = name !== shown;
+                root.getElementById(name + '-tab').setAttribute('aria-selected', String(name === shown));
+            }
+            changed();
+        }
+        render();
+        const ready = (async () => {
+            try {
+                const saved = await storage.get(key, null);
+                if (!stopped && !interacted && ['media', 'qa'].includes(saved)) { page = saved; render(); }
+                return '';
+            } catch (error) { return '面板页签读取失败：' + error.message; }
+        })();
+        return { ready, select(value) {
+            if (stopped || !['media', 'qa'].includes(value) || (value === 'qa' && !qaEnabled)) return;
+            interacted = true; page = value; render();
+            writes = writes.then(() => storage.set(key, value)).catch(error => {
+                if (!stopped) report('面板页签保存失败：' + error.message);
+            });
+        }, stop() { stopped = true; } };
+    }
+
+    function createPanelViewController(root, storage, report, key = PANEL_VIEW_KEY, changed = () => {}) {
+        let collapsed = true, interacted = false, stopped = false, writes = Promise.resolve();
+        const panel = root.getElementById('panel'), toggle = root.getElementById('toggle');
+        function render() {
+            panel.hidden = collapsed;
+            toggle.hidden = !collapsed;
+            toggle.setAttribute('aria-expanded', String(!collapsed));
+            changed();
+        }
+        render();
+        const ready = (async () => {
+            try {
+                const saved = await storage.get(key, null);
+                if (!stopped && !interacted && typeof saved === 'boolean') { collapsed = saved; render(); }
+                return '';
+            } catch (error) { return '面板收起状态读取失败：' + error.message; }
+        })();
+        return { ready, toggle() {
+            if (stopped) return;
+            interacted = true; collapsed = !collapsed; render();
+            const snapshot = collapsed;
+            writes = writes.then(() => storage.set(key, snapshot)).catch(error => {
+                if (!stopped) report('面板收起状态保存失败：' + error.message);
+            });
+        }, stop() { stopped = true; } };
+    }
+
+    function createPanelDragController(win, host, handles, storage, report, key = POSITION_KEY, beforeReady = null) {
         let position = null, gesture = null, suppressClick = null;
         let stopped = false, interacted = false, writes = Promise.resolve();
         const removers = [];
@@ -853,7 +1251,7 @@
         };
         const valid = value => value && typeof value.left === 'number' && Number.isFinite(value.left) &&
             typeof value.top === 'number' && Number.isFinite(value.top);
-        function reflow() {
+        function reflow(persist = false) {
             if (stopped || !position || !host.getClientRects().length) return;
             const rect = host.getBoundingClientRect(), margin = 8;
             position = {
@@ -862,6 +1260,7 @@
             };
             host.style.left = position.left + 'px'; host.style.top = position.top + 'px';
             host.style.right = 'auto';
+            if (persist === true) save();
         }
         function save() {
             const snapshot = position ? { ...position } : null;
@@ -877,7 +1276,7 @@
             if (active.moved) {
                 if (cancelled) {
                     position = active.previous;
-                    if (!position) { host.style.left = 'auto'; host.style.right = '12px'; host.style.top = '72px'; }
+                    if (!position) { host.style.left = 'auto'; host.style.right = '12px'; host.style.top = '12px'; }
                     reflow();
                 }
                 else { reflow(); save(); }
@@ -887,7 +1286,7 @@
         }
         function reset() {
             interacted = true; finish(true); position = null;
-            host.style.left = 'auto'; host.style.right = '12px'; host.style.top = '72px';
+            host.style.left = 'auto'; host.style.right = '12px'; host.style.top = '12px';
             save();
         }
         for (const handle of handles) {
@@ -933,6 +1332,7 @@
         observer?.observe(host);
         const ready = (async () => {
             try {
+                if (beforeReady) await beforeReady;
                 const saved = await storage.get(key, null);
                 if (!stopped && !interacted && valid(saved)) { position = { left: saved.left, top: saved.top }; reflow(); }
                 return '';
@@ -948,7 +1348,7 @@
         if (doc.getElementById(PANEL_ID)) return null;
         const host = doc.createElement('div');
         host.id = PANEL_ID;
-        host.style.cssText = 'all:initial;position:fixed;top:72px;right:12px;z-index:2147483647;display:block;';
+        host.style.cssText = 'all:initial;position:fixed;top:12px;right:12px;z-index:2147483647;display:block;visibility:hidden;';
         // 页面 CSS 不会覆盖面板内的控件；面板关闭后可由右侧按钮重新展开。
         const root = host.attachShadow({ mode: 'open' });
         root.innerHTML = `
@@ -966,9 +1366,9 @@
             #qa-count{font-size:16px;font-weight:500;margin:10px 0 8px}#qa-note{font-size:12px;color:var(--muted);margin:0 0 18px}#qa-run{width:100%}.qa-actions{display:flex;justify-content:space-between;margin-top:7px}.qa-actions button{padding:6px 0;border:0;background:transparent;color:var(--muted);font-size:12px}#qa-results{list-style:none;padding:0;margin:12px 0 0}#qa-results li{padding:10px 0;border-top:1px solid var(--line);white-space:pre-wrap;font-size:12px;overflow-wrap:anywhere}.qa-footer{margin:12px 0 0;color:var(--muted);font-size:11px}footer{border-top:1px solid var(--line);padding:10px 18px;font-size:11px;color:var(--muted);display:flex;align-items:center;gap:6px}.dot{width:6px;height:6px;flex-shrink:0;background:light-dark(#30816b,#79cbb3);border-radius:50%}
             @media(pointer:coarse){button{min-height:40px}.switch-row{min-height:48px}#rate{font-size:16px}}
           </style>
-          <button id="toggle" type="button" aria-expanded="true" aria-controls="panel" title="点击展开，按住可拖动" hidden>网课助手</button>
-          <section id="panel" aria-label="网课助手">
-            <header id="drag-handle" tabindex="0" aria-label="拖动网课助手；也可用方向键移动，按住 Shift 加速" title="按住标题栏拖动"><span class="brand" aria-hidden="true">课</span><div class="identity"><h2>网课助手<span class="version">5.6.1</span></h2><p id="platform"></p></div><button id="reset-position" type="button" title="恢复面板默认位置" aria-label="恢复面板默认位置">复位</button><button id="collapse" type="button" aria-label="收起网课助手">−</button></header>
+          <button id="toggle" type="button" aria-expanded="false" aria-controls="panel" title="点击展开，按住可拖动">网课助手</button>
+          <section id="panel" hidden aria-label="网课助手">
+            <header id="drag-handle" tabindex="0" aria-label="拖动网课助手；也可用方向键移动，按住 Shift 加速" title="按住标题栏拖动"><span class="brand" aria-hidden="true">课</span><div class="identity"><h2>网课助手<span class="version">5.7.8</span></h2><p id="platform"></p></div><button id="reset-position" type="button" title="恢复面板默认位置" aria-label="恢复面板默认位置">复位</button><button id="collapse" type="button" aria-label="收起网课助手">−</button></header>
             <nav role="tablist" aria-label="功能"><button id="media-tab" type="button" role="tab" aria-selected="true" aria-controls="media-page">视频播放</button><button id="qa-tab" type="button" role="tab" aria-selected="false" aria-controls="qa-page">自动答题</button></nav>
             <section id="media-page" class="page" role="tabpanel" aria-labelledby="media-tab">
               <div class="section-heading"><h3>播放设置</h3><p id="media-count"></p></div>
@@ -980,9 +1380,10 @@
               <div class="actions"><button id="apply" class="primary" type="button">应用播放设置</button><button id="reset" type="button">恢复默认</button></div>
             </section>
             <section id="qa-page" class="page" role="tabpanel" aria-labelledby="qa-tab" hidden>
-              <h3>优学院自动答题</h3><p id="qa-count"></p><p id="qa-note">使用优学院平台答案，依次查询并填入当前练习。</p>
+              <h3 id="qa-heading">优学院自动答题</h3><p id="qa-count"></p><p id="qa-note">使用优学院平台答案，依次查询并填入当前练习。</p>
               <button id="qa-run" class="primary" type="button">查询答案并自动填入</button><div class="qa-actions"><button id="qa-scan" type="button">重新识别题目</button><button id="qa-stop" type="button" disabled>停止</button></div>
-              <ol id="qa-results" aria-label="逐题填入结果"></ol><p class="qa-footer">填入后请核对，提交由你操作。</p>
+              <div id="zhs-flow" hidden><p class="qa-footer">仅限智慧树知识点练习：优先使用本次已公布的反馈，遇到新题用临时答案提交后收集解析。每次启动最多提交 3 轮；全对后提前停止。随机换题时不保证完成，可能留下低分记录。</p><div class="actions"><button id="zhs-start" type="button">反馈练习全流程（会提交）</button><button id="zhs-stop" type="button">停止流程</button></div><p id="zhs-state" class="qa-footer"></p></div>
+              <ol id="qa-results" aria-label="逐题填入结果"></ol><p class="qa-footer">单题填入后由你核对提交；智慧树全流程会自动提交。</p>
             </section>
             <p id="message" role="status" aria-live="polite">面板已启动，正在读取设置…</p><footer><span class="dot" aria-hidden="true"></span>控制当前课件 · 支持收起</footer>
           </section>
@@ -990,8 +1391,14 @@
         (doc.body || doc.documentElement).appendChild(host);
         const ui = id => root.getElementById(id);
         const message = text => { ui('message').textContent = text; };
-        const positionKey = POSITION_KEY + (win.top === win ? ':top' : ':frame:' + win.location.hostname);
-        const panelDrag = createPanelDragController(win, host, [ui('drag-handle'), ui('toggle')], storage, message, positionKey);
+        const panelScope = win.top === win ? ':top' : ':frame:' + win.location.hostname;
+        const positionKey = POSITION_KEY + panelScope;
+        let panelDrag = null;
+        const panelView = createPanelViewController(root, storage, message, PANEL_VIEW_KEY + panelScope, () => panelDrag?.reflow(true));
+        // 先恢复收起状态，再按最终尺寸恢复位置，避免展开面板先将悬浮球位置挤到窗口边界。
+        let resolveTabLayout;
+        const tabLayout = new Promise(resolve => { resolveTabLayout = resolve; });
+        panelDrag = createPanelDragController(win, host, [ui('drag-handle'), ui('toggle')], storage, message, positionKey, Promise.all([panelView.ready, tabLayout]));
         ui('reset-position').addEventListener('click', panelDrag.reset);
         let settings = { ...DEFAULTS };
         let stopped = false;
@@ -1000,17 +1407,29 @@
         const framed = win.top !== win;
         const media = createMediaController(doc, () => settings, message);
         const lesson = isUlearningLesson(win.location);
+        const zhs = isDomain(win.location.hostname, 'zhihuishu.com');
+        const qaEnabled = lesson || zhs;
+        const pageDoc = zhs ? (typeof unsafeWindow !== 'undefined' ? unsafeWindow.document : doc) : doc;
+        const collect = () => zhs ? readZhihuishuQuestion(doc, pageDoc) : collectQuestions(doc);
         // 仅只读同页公开的导航模型；不从页面全局读取认证信息，不调用其导航函数。
         const autoNext = createAutoNextController(win, doc, () => settings, message, win,
             () => (typeof unsafeWindow !== 'undefined' ? unsafeWindow : win).koLearnCourseViewModel, () => updateCounts());
         ui('auto-next-label').hidden = ui('auto-next-state').hidden = ui('video-only-label').hidden = !lesson || framed;
-        ui('qa-tab').hidden = !lesson;
+        ui('qa-tab').hidden = !qaEnabled;
+        if (zhs) {
+            ui('qa-heading').textContent = '智慧树知识点练习';
+            ui('qa-note').textContent = '“查询并填入”只处理当前题，不提交。没有答案时，可手动启动下方反馈练习全流程。正式考试和普通作业尚未适配。';
+        }
+        let flow;
+        if (zhs && !framed) flow = createZhihuishuFlow({ win, doc, pageDoc, storage, report: message,
+            changed: () => updateCounts() });
         const transport = createPlatformTransport({
             GM_xmlhttpRequest: typeof GM_xmlhttpRequest === 'function' ? GM_xmlhttpRequest : undefined,
             GM: typeof GM !== 'undefined' ? GM : undefined
         });
         const questionRunner = createQuestionRunner({ doc,
-            provider: createPlatformProvider(win, transport), report: message,
+            collect, provider: zhs ? async question => zhihuishuFeedbackAnswer(question, flow?.records() || []) :
+                createPlatformProvider(win, transport), report: message,
             results(rows) {
                 ui('qa-results').replaceChildren(...rows.map(row => {
                     const item = doc.createElement('li');
@@ -1022,9 +1441,13 @@
         const updateCounts = () => {
             ui('platform').textContent = detectPlatform(win.location.hostname) + (framed ? ' · 嵌入页面' : '');
             ui('media-count').textContent = '检测到 ' + media.count() + ' 个视频 / 音频';
-            const questions = lesson ? collectQuestions(doc) : [];
-            ui('qa-run').disabled = !lesson || questions.length === 0 || questionRunner.busy();
+            const questions = qaEnabled ? collect() : [];
+            ui('qa-run').disabled = !qaEnabled || questions.length === 0 || questionRunner.busy() || flow?.active();
             ui('qa-count').textContent = questions.length ? '已识别 ' + questions.length + ' 道题' : '当前页没有可识别的练习题';
+            ui('zhs-flow').hidden = !flow || !zhihuishuContext(win.location);
+            ui('zhs-start').disabled = !!flow?.active() || questionRunner.busy();
+            ui('zhs-stop').disabled = !flow?.active();
+            ui('zhs-state').textContent = flow?.stage() ? '流程阶段：' + ({initial:'填写练习', 'await-feedback':'等待反馈',feedback:'收集解析',redo:'准备重答',refill:'重新填写',done:'已完成',stopped:'已停止'}[flow.stage()] || '核对结果') : '';
             if (lesson && !framed) ui('auto-next-state').textContent = autoNext.describe();
             if (framed) host.style.display = media.count() || questions.length ? 'block' : 'none';
         };
@@ -1042,18 +1465,13 @@
                 button.setAttribute('aria-pressed', String(Number(button.dataset.rate) === value));
             }
         }
-        const selectPage = page => {
-            if (page === 'qa' && !lesson) return;
-            for (const name of ['media', 'qa']) {
-                ui(name + '-page').hidden = name !== page;
-                ui(name + '-tab').setAttribute('aria-selected', String(name === page));
-            }
-            panelDrag.reflow();
-        };
+        const panelTabs = createPanelTabController(root, storage, message, PANEL_TAB_KEY + panelScope, qaEnabled, () => panelDrag?.reflow(true));
+        panelTabs.ready.then(resolveTabLayout, resolveTabLayout);
+        const selectPage = panelTabs.select;
         for (const name of ['media', 'qa']) {
             ui(name + '-tab').addEventListener('click', () => selectPage(name));
             ui(name + '-tab').addEventListener('keydown', event => {
-                if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key) || !lesson) return;
+                if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key) || !qaEnabled) return;
                 event.preventDefault();
                 const target = event.key === 'Home' ? 'media' : event.key === 'End' ? 'qa' : name === 'media' ? 'qa' : 'media';
                 selectPage(target); ui(target + '-tab').focus();
@@ -1065,29 +1483,23 @@
             message('已选择 ' + button.dataset.rate + ' 倍速，点击“应用播放设置”后生效。');
         });
         ui('rate').addEventListener('input', updatePresets);
-        const toggle = () => {
-            const closed = !ui('panel').hidden;
-            ui('panel').hidden = closed;
-            ui('toggle').hidden = !closed;
-            ui('toggle').setAttribute('aria-expanded', String(!closed));
-            panelDrag.reflow();
-        };
-        ui('toggle').addEventListener('click', toggle);
-        ui('collapse').addEventListener('click', toggle);
-        if (framed) toggle();
+        ui('toggle').addEventListener('click', panelView.toggle);
+        ui('collapse').addEventListener('click', panelView.toggle);
         ui('qa-scan').addEventListener('click', () => {
-            const questions = collectQuestions(doc);
+            const questions = collect();
             updateCounts();
             message('已识别 ' + questions.length + ' 道练习题，支持 ' + questions.filter(question => question.type !== 'unsupported').length + ' 道。');
         });
         ui('qa-run').addEventListener('click', async () => {
-            if (!lesson || questionRunner.busy()) return;
+            if (!qaEnabled || questionRunner.busy() || flow?.active()) return;
             ui('qa-run').disabled = true;
             ui('qa-stop').disabled = false;
             try { await questionRunner.run(); }
             finally { ui('qa-stop').disabled = true; updateCounts(); }
         });
         ui('qa-stop').addEventListener('click', () => { questionRunner.cancel(); });
+        ui('zhs-start').addEventListener('click', () => { void flow?.begin().catch(error => message(error.message)); });
+        ui('zhs-stop').addEventListener('click', () => { void flow?.cancel().catch(error => message(error.message)); });
 
         function persistSettings() {
             // 串行写入，避免快速连续点击时较早的异步写入覆盖较新的设置。
@@ -1148,6 +1560,9 @@
             media.stop();
             autoNext.stop();
             questionRunner.cancel();
+            flow?.stop();
+            panelTabs.stop();
+            panelView.stop();
             panelDrag.stop();
             win.removeEventListener('pagehide', onPageHide);
             host.remove();
@@ -1156,12 +1571,17 @@
         const ready = (async () => {
             ui('apply').disabled = ui('reset').disabled = ui('qa-run').disabled = ui('auto-next').disabled = ui('video-only').disabled = true;
             const warnings = [];
+            const viewWarning = await panelView.ready;
+            if (viewWarning) warnings.push(viewWarning);
+            const tabWarning = await panelTabs.ready;
+            if (tabWarning) warnings.push(tabWarning);
             const positionWarning = await panelDrag.ready;
             if (positionWarning) warnings.push(positionWarning);
             try { settings = normalizeSettings(await storage.get(SETTINGS_KEY, DEFAULTS)); }
             catch (error) { warnings.push('设置读取失败：' + error.message); }
             if (stopped) return;
             updateInputs();
+            host.style.visibility = 'visible';
             message(warnings.join('\n') || '运行正常。修改播放设置后，点击“应用播放设置”。');
             media.scan();
             autoNext.scan();
@@ -1171,15 +1591,17 @@
             ui('apply').disabled = ui('reset').disabled = ui('auto-next').disabled = ui('video-only').disabled = false;
             updateCounts();
         })();
-        return { ready, stop, root, media, autoNext, panelDrag };
+        return { ready, stop, root, media, autoNext, panelDrag, panelView, panelTabs };
     }
 
     if (typeof window === 'undefined' && typeof module !== 'undefined') {
         module.exports = { detectPlatform, normalizeSettings, normalizeQuestion,
             answerText, setInputValue, createStorage, createMediaController, start,
-            PANEL_ID, SETTINGS_KEY, POSITION_KEY, createPanelDragController, isUlearningLesson, collectQuestions, questionSignature,
+            PANEL_ID, SETTINGS_KEY, POSITION_KEY, PANEL_VIEW_KEY, PANEL_TAB_KEY, createPanelDragController, createPanelViewController, createPanelTabController, isUlearningLesson, collectQuestions, questionSignature,
             parsePlatformAnswer, choiceIndexes, planAnswer, applyAnswer, platformHeaders, createPlatformProvider, createQuestionRunner,
-            createPlatformTransport, validAnswerUrl, readLessonNavigation, createAutoNextController, detectQuestionType };
+            createPlatformTransport, validAnswerUrl, readLessonNavigation, createAutoNextController, detectQuestionType,
+            ZHS_FLOW_KEY, zhihuishuContext, zhihuishuOptionKey, readZhihuishuQuestion, collectZhihuishuFeedback,
+            zhihuishuFeedbackAnswer, zhihuishuAction, createZhihuishuFlow, applyZhihuishuAnswer, zhihuishuBlankKey, zhihuishuBlankFingerprint };
         return;
     }
     // typeof 允许脚本在只提供 GM.* 异步 API 的管理器中启动。

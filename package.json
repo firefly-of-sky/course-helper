@@ -1,8 +1,8 @@
 {
   "name": "course-helper",
-  "version": "5.6.1",
+  "version": "5.7.8",
   "private": true,
-  "description": "网课视频播放、跨章连播与优学院课件练习辅助用户脚本",
+  "description": "网课视频播放、优学院填答与智慧树知识点反馈练习辅助用户脚本",
   "license": "AGPL-3.0-only",
   "engines": {
     "node": ">=18"

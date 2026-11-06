@@ -88,7 +88,7 @@ test('指针取消或窗口失焦时恢复起点；复位清除位置，stop 清
     f.drag(-300, 10); await settled(); const before = { ...f.host.style };
     f.handle.emit('pointerdown'); f.win.emit('pointermove', { clientX: 20 }); f.win.emit('blur');
     assert.equal(f.host.style.left, before.left); assert.equal(f.host.style.top, before.top);
-    f.controller.reset(); await settled(); assert.equal(f.writes.at(-1), null); assert.equal(f.host.style.top, '72px');
+    f.controller.reset(); await settled(); assert.equal(f.writes.at(-1), null); assert.equal(f.host.style.top, '12px');
     f.controller.stop();
     assert.equal([...f.win.listeners.values(), ...f.handle.listeners.values(), ...f.toggle.listeners.values()].flat().length, 0);
 });

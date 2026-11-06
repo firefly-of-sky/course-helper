@@ -1,10 +1,10 @@
 <!doctype html><meta charset="utf-8"><title>网课助手 · 拖动验证</title>
 <style>body{font:16px/1.7 system-ui;margin:32px;background:#f6f8fb;color:#23303e}#evidence{white-space:pre-wrap}video{width:240px;height:100px}#target{margin:25px 0;width:50%;padding:25px;background:#e8f2f9}</style>
-<h1>网课助手 · 拖动验证</h1><p>独立验证页，不连接课程。标题栏、悬浮按钮支持拖动；位置保存在本地模拟存储中。</p><div id="target">页面内容区域，可将面板移开以避免遮挡。</div><video controls></video><p id="evidence" role="status">正在加载…</p>
+<h1>网课助手 · 拖动验证</h1><p>独立验证页，不连接课程。标题栏、悬浮按钮支持拖动；位置和收起状态保存在本地模拟存储中。首次默认显示右上角悬浮球。</p><p><a href="?page=2">切换到第二个验证页面</a> · <a href="?page=1">返回第一个验证页面</a></p><div id="target">页面内容区域，可将面板移开以避免遮挡。</div><video controls></video><p id="evidence" role="status">正在加载…</p>
 <script>
 (async()=>{
  const module={exports:{}};new Function('module','window',await(await fetch('../../repaired.user.js')).text())(module,undefined);const core=module.exports;
- let writes=0;const storage={get:async(key,fallback)=>{const value=localStorage.getItem('drag-fixture:'+key);return value===null?(key===core.SETTINGS_KEY?{rate:1.5,muted:true,autoPlay:false,autoNext:false,videoOnly:false}:fallback):JSON.parse(value);},set:async(key,value)=>{writes++;localStorage.setItem('drag-fixture:'+key,JSON.stringify(value));update();}};
+ let writes=0;const storage={get:async(key,fallback)=>{const value=localStorage.getItem('panel-state-5.7.6:'+key);return value===null?(key===core.SETTINGS_KEY?{rate:1.5,muted:true,autoPlay:false,autoNext:false,videoOnly:false}:fallback):JSON.parse(value);},set:async(key,value)=>{writes++;localStorage.setItem('panel-state-5.7.6:'+key,JSON.stringify(value));update();}};
  const helper=core.start(window,document,storage);await helper.ready;const host=document.getElementById(core.PANEL_ID);
  function update(){if(!host)return;const rect=host.getBoundingClientRect();document.getElementById('evidence').textContent=`面板位置：left ${Math.round(rect.left)} / top ${Math.round(rect.top)}\n面板尺寸：${Math.round(rect.width)} × ${Math.round(rect.height)}\n位置保存次数：${writes}\n当前倍速：${helper.root.getElementById('rate').value}\n当前状态：${helper.root.getElementById('panel').hidden?'已收起':'已展开'}`;}
  new ResizeObserver(update).observe(host);window.addEventListener('pointerup',()=>setTimeout(update,0));window.addEventListener('resize',()=>setTimeout(update,0));helper.root.addEventListener('click',()=>setTimeout(update,0));helper.root.addEventListener('keydown',()=>setTimeout(update,0));update();
